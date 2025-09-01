@@ -142,6 +142,408 @@ func (t *Transaction) QueryRow(query string, args ...interface{}) *sql.Row {
     return t.tx.QueryRow(query, args...)
 }
 
+// JOIN FUNCTIONALITY
+
+// JoinType represents the type of SQL join
+type JoinType string
+
+const (
+    InnerJoin JoinType = "INNER JOIN"
+    LeftJoin  JoinType = "LEFT JOIN"
+    RightJoin JoinType = "RIGHT JOIN"
+    FullJoin  JoinType = "FULL OUTER JOIN"
+)
+
+// Join represents a single join operation
+type Join struct {
+    Type      JoinType
+    Table     string
+    Condition string
+}
+
+// QueryBuilder helps build complex queries with joins
+type QueryBuilder struct {
+    baseTable string
+    columns   []string
+    joins     []Join
+    where     string
+    whereArgs []interface{}
+    orderBy   string
+    groupBy   string
+    having    string
+    limit     string
+    offset    string
+}
+
+// NewQueryBuilder creates a new query builder
+func NewQueryBuilder(baseTable string) *QueryBuilder {
+    return &QueryBuilder{
+        baseTable: baseTable,
+        joins:     make([]Join, 0),
+        whereArgs: make([]interface{}, 0),
+    }
+}
+
+// Select sets the columns to select
+func (qb *QueryBuilder) Select(columns ...string) *QueryBuilder {
+    qb.columns = columns
+    return qb
+}
+
+// Join adds a join to the query
+func (qb *QueryBuilder) Join(joinType JoinType, table, condition string) *QueryBuilder {
+    qb.joins = append(qb.joins, Join{
+        Type:      joinType,
+        Table:     table,
+        Condition: condition,
+    })
+    return qb
+}
+
+// InnerJoin adds an INNER JOIN
+func (qb *QueryBuilder) InnerJoin(table, condition string) *QueryBuilder {
+    return qb.Join(InnerJoin, table, condition)
+}
+
+// LeftJoin adds a LEFT JOIN
+func (qb *QueryBuilder) LeftJoin(table, condition string) *QueryBuilder {
+    return qb.Join(LeftJoin, table, condition)
+}
+
+// RightJoin adds a RIGHT JOIN
+func (qb *QueryBuilder) RightJoin(table, condition string) *QueryBuilder {
+    return qb.Join(RightJoin, table, condition)
+}
+
+// FullJoin adds a FULL OUTER JOIN
+func (qb *QueryBuilder) FullJoin(table, condition string) *QueryBuilder {
+    return qb.Join(FullJoin, table, condition)
+}
+
+// Where sets the WHERE clause
+func (qb *QueryBuilder) Where(condition string, args ...interface{}) *QueryBuilder {
+    qb.where = condition
+    qb.whereArgs = args
+    return qb
+}
+
+// OrderBy sets the ORDER BY clause
+func (qb *QueryBuilder) OrderBy(orderBy string) *QueryBuilder {
+    qb.orderBy = orderBy
+    return qb
+}
+
+// GroupBy sets the GROUP BY clause
+func (qb *QueryBuilder) GroupBy(groupBy string) *QueryBuilder {
+    qb.groupBy = groupBy
+    return qb
+}
+
+// Having sets the HAVING clause
+func (qb *QueryBuilder) Having(having string) *QueryBuilder {
+    qb.having = having
+    return qb
+}
+
+// Limit sets the LIMIT clause
+func (qb *QueryBuilder) Limit(limit int) *QueryBuilder {
+    qb.limit = fmt.Sprintf("%d", limit)
+    return qb
+}
+
+// Offset sets the OFFSET clause
+func (qb *QueryBuilder) Offset(offset int) *QueryBuilder {
+    qb.offset = fmt.Sprintf("%d", offset)
+    return qb
+}
+
+// Build constructs the final SQL query
+func (qb *QueryBuilder) Build() (string, []interface{}) {
+    var query strings.Builder
+
+    // SELECT clause
+    if len(qb.columns) > 0 {
+        query.WriteString("SELECT ")
+        query.WriteString(strings.Join(qb.columns, ", "))
+    } else {
+        query.WriteString("SELECT *")
+    }
+
+    // FROM clause
+    query.WriteString(" FROM ")
+    query.WriteString(qb.baseTable)
+
+    // JOIN clauses
+    for _, join := range qb.joins {
+        query.WriteString(" ")
+        query.WriteString(string(join.Type))
+        query.WriteString(" ")
+        query.WriteString(join.Table)
+        query.WriteString(" ON ")
+        query.WriteString(join.Condition)
+    }
+
+    // WHERE clause
+    if qb.where != "" {
+        query.WriteString(" WHERE ")
+        query.WriteString(qb.where)
+    }
+
+    // GROUP BY clause
+    if qb.groupBy != "" {
+        query.WriteString(" GROUP BY ")
+        query.WriteString(qb.groupBy)
+    }
+
+    // HAVING clause
+    if qb.having != "" {
+        query.WriteString(" HAVING ")
+        query.WriteString(qb.having)
+    }
+
+    // ORDER BY clause
+    if qb.orderBy != "" {
+        query.WriteString(" ORDER BY ")
+        query.WriteString(qb.orderBy)
+    }
+
+    // LIMIT clause
+    if qb.limit != "" {
+        query.WriteString(" LIMIT ")
+        query.WriteString(qb.limit)
+    }
+
+    // OFFSET clause
+    if qb.offset != "" {
+        query.WriteString(" OFFSET ")
+        query.WriteString(qb.offset)
+    }
+
+    return query.String(), qb.whereArgs
+}
+
+// Execute executes the query and returns rows
+func (qb *QueryBuilder) Execute(db *DB) (*sql.Rows, error) {
+    query, args := qb.Build()
+    return db.Query(query, args...)
+}
+
+// ExecuteOne executes the query and returns a single row
+func (qb *QueryBuilder) ExecuteOne(db *DB) *sql.Row {
+    query, args := qb.Build()
+    return db.QueryRow(query, args...)
+}
+
+// ExecuteStruct executes the query and scans results into structs
+func (qb *QueryBuilder) ExecuteStruct(db *DB, dest interface{}) error {
+    query, args := qb.Build()
+    
+    destValue := reflect.ValueOf(dest)
+    if destValue.Kind() != reflect.Ptr {
+        return fmt.Errorf("dest must be a pointer")
+    }
+
+    destValue = destValue.Elem()
+    if destValue.Kind() != reflect.Slice {
+        return fmt.Errorf("dest must be a pointer to slice")
+    }
+
+    rows, err := db.Query(query, args...)
+    if err != nil {
+        return err
+    }
+    defer rows.Close()
+
+    // Get the element type of the slice
+    elementType := destValue.Type().Elem()
+
+    // Create slice to hold results
+    results := reflect.MakeSlice(destValue.Type(), 0, 0)
+
+    for rows.Next() {
+        // Create new instance of element type
+        elem := reflect.New(elementType).Interface()
+
+        if err := scanIntoStruct(rows, elem); err != nil {
+            return err
+        }
+
+        // Append to results slice
+        results = reflect.Append(results, reflect.ValueOf(elem).Elem())
+    }
+
+    // Set the destination slice
+    destValue.Set(results)
+    return rows.Err()
+}
+
+// ExecuteOneStruct executes the query and scans result into a single struct
+func (qb *QueryBuilder) ExecuteOneStruct(db *DB, dest interface{}) error {
+    query, args := qb.Build()
+    
+    destValue := reflect.ValueOf(dest)
+    if destValue.Kind() != reflect.Ptr {
+        return fmt.Errorf("dest must be a pointer")
+    }
+
+    rows, err := db.Query(query, args...)
+    if err != nil {
+        return err
+    }
+    defer rows.Close()
+
+    if !rows.Next() {
+        return sql.ErrNoRows
+    }
+
+    return scanIntoStruct(rows, dest)
+}
+
+// ExecuteInTransaction executes the query within a transaction
+func (qb *QueryBuilder) ExecuteInTransaction(tx *Transaction) (*sql.Rows, error) {
+    query, args := qb.Build()
+    return tx.Query(query, args...)
+}
+
+// ExecuteOneInTransaction executes the query for one row within a transaction
+func (qb *QueryBuilder) ExecuteOneInTransaction(tx *Transaction) *sql.Row {
+    query, args := qb.Build()
+    return tx.QueryRow(query, args...)
+}
+
+// ExecuteStructInTransaction executes the query and scans results into structs within a transaction
+func (qb *QueryBuilder) ExecuteStructInTransaction(tx *Transaction, dest interface{}) error {
+    query, args := qb.Build()
+    
+    destValue := reflect.ValueOf(dest)
+    if destValue.Kind() != reflect.Ptr {
+        return fmt.Errorf("dest must be a pointer")
+    }
+
+    destValue = destValue.Elem()
+    if destValue.Kind() != reflect.Slice {
+        return fmt.Errorf("dest must be a pointer to slice")
+    }
+
+    rows, err := tx.Query(query, args...)
+    if err != nil {
+        return err
+    }
+    defer rows.Close()
+
+    // Get the element type of the slice
+    elementType := destValue.Type().Elem()
+
+    // Create slice to hold results
+    results := reflect.MakeSlice(destValue.Type(), 0, 0)
+
+    for rows.Next() {
+        // Create new instance of element type
+        elem := reflect.New(elementType).Interface()
+
+        if err := scanIntoStruct(rows, elem); err != nil {
+            return err
+        }
+
+        // Append to results slice
+        results = reflect.Append(results, reflect.ValueOf(elem).Elem())
+    }
+
+    // Set the destination slice
+    destValue.Set(results)
+    return rows.Err()
+}
+
+// Simple join methods for backward compatibility
+
+// SelectWithJoin performs a SELECT query with joins
+func (db *DB) SelectWithJoin(baseTable string, columns []string, joins []Join, where string, whereArgs ...interface{}) (*sql.Rows, error) {
+    qb := NewQueryBuilder(baseTable)
+    
+    if len(columns) > 0 {
+        qb.Select(columns...)
+    }
+    
+    for _, join := range joins {
+        qb.Join(join.Type, join.Table, join.Condition)
+    }
+    
+    if where != "" {
+        qb.Where(where, whereArgs...)
+    }
+    
+    return qb.Execute(db)
+}
+
+// SelectWithInnerJoin performs a SELECT query with an INNER JOIN
+func (db *DB) SelectWithInnerJoin(baseTable, joinTable, joinCondition string, columns []string, where string, whereArgs ...interface{}) (*sql.Rows, error) {
+    joins := []Join{
+        {Type: InnerJoin, Table: joinTable, Condition: joinCondition},
+    }
+    return db.SelectWithJoin(baseTable, columns, joins, where, whereArgs...)
+}
+
+// SelectWithLeftJoin performs a SELECT query with a LEFT JOIN
+func (db *DB) SelectWithLeftJoin(baseTable, joinTable, joinCondition string, columns []string, where string, whereArgs ...interface{}) (*sql.Rows, error) {
+    joins := []Join{
+        {Type: LeftJoin, Table: joinTable, Condition: joinCondition},
+    }
+    return db.SelectWithJoin(baseTable, columns, joins, where, whereArgs...)
+}
+
+// CountWithJoin performs a COUNT query with joins
+func (db *DB) CountWithJoin(baseTable string, joins []Join, where string, whereArgs ...interface{}) (int64, error) {
+    qb := NewQueryBuilder(baseTable).Select("COUNT(*)")
+    
+    for _, join := range joins {
+        qb.Join(join.Type, join.Table, join.Condition)
+    }
+    
+    if where != "" {
+        qb.Where(where, whereArgs...)
+    }
+    
+    query, args := qb.Build()
+    var count int64
+    err := db.QueryRow(query, args...).Scan(&count)
+    return count, err
+}
+
+// Transaction methods for joins
+
+// SelectWithJoin performs a SELECT query with joins within a transaction
+func (t *Transaction) SelectWithJoin(baseTable string, columns []string, joins []Join, where string, whereArgs ...interface{}) (*sql.Rows, error) {
+    qb := NewQueryBuilder(baseTable)
+    
+    if len(columns) > 0 {
+        qb.Select(columns...)
+    }
+    
+    for _, join := range joins {
+        qb.Join(join.Type, join.Table, join.Condition)
+    }
+    
+    if where != "" {
+        qb.Where(where, whereArgs...)
+    }
+    
+    return qb.ExecuteInTransaction(t)
+}
+
+// Helper methods to create query builders
+
+// QueryBuilder creates a new query builder from DB
+func (db *DB) QueryBuilder(baseTable string) *QueryBuilder {
+    return NewQueryBuilder(baseTable)
+}
+
+// QueryBuilder creates a new query builder from Transaction
+func (t *Transaction) QueryBuilder(baseTable string) *QueryBuilder {
+    return NewQueryBuilder(baseTable)
+}
+
+// BASIC TABLE OPERATIONS
+
 // CreateTable creates a table with the given schema
 func (db *DB) CreateTable(tableName string, schema string) error {
     query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", tableName, schema)
@@ -197,6 +599,8 @@ func (db *DB) ListTables() ([]string, error) {
     }
     return tables, rows.Err()
 }
+
+// CRUD OPERATIONS
 
 // Insert inserts a new record into the specified table
 func (db *DB) Insert(tableName string, data map[string]interface{}) (int64, error) {
@@ -304,6 +708,8 @@ func (db *DB) Count(tableName string, where string, whereArgs ...interface{}) (i
     err := db.QueryRow(query, whereArgs...).Scan(&count)
     return count, err
 }
+
+// DATABASE MAINTENANCE
 
 // Backup creates a backup of the database
 func (db *DB) Backup(backupPath string) error {

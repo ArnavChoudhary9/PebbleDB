@@ -272,49 +272,6 @@ POST /api/db
 
 ---
 
-## 18. Add “last\_login” Column to Users
-
-```json
-POST /api/db
-{
-  "action": "alter_table",
-  "table": "users",
-  "add_column": {
-    "last_login": {"type": "DATETIME"}
-  }
-}
-```
-
----
-
-## 19. Update Alice’s Last Login
-
-```json
-POST /api/db
-{
-  "action": "update",
-  "table": "users",
-  "data": {"last_login": "2025-09-02T10:00:00Z"},
-  "where": "id = ?",
-  "where_args": [1]
-}
-```
-
----
-
-## 20. Export Users Table
-
-```json
-POST /api/db
-{
-  "action": "export",
-  "table": "users",
-  "format": "json"
-}
-```
-
----
-
 ✅ By following these 20 steps in sequence, you’ll simulate a **full project lifecycle**:
 
 * Creating tables
