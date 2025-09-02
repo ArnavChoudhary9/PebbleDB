@@ -29,6 +29,7 @@ func main() {
 	defer db.Close()
 
 	// Add global middleware
+	server.Use(authMiddleware)
 	server.Use(LoggingMiddleware)
 	server.Use(CORSMiddleware)
 	server.Use(dbMiddleware(db))
@@ -48,6 +49,7 @@ func main() {
 }
 
 // Handler functions
-func homeHandler(w http.ResponseWriter, r *http.Request) {
+func homeHandler(w http.ResponseWriter, r *http.Request) error {
 	fmt.Fprintf(w, "Welcome to PebbleDB Server!")
+	return nil
 }

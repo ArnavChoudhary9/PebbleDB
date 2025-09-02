@@ -17,12 +17,12 @@ type contextKey string
 const dbContextKey contextKey = "database"
 
 // Middleware to inject database into context
-func dbMiddleware(db *DB) func(http.HandlerFunc) http.HandlerFunc {
-    return func(next http.HandlerFunc) http.HandlerFunc {
-        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func dbMiddleware(db *DB) func(HTTPHandlerFunc) HTTPHandlerFunc {
+    return func(next HTTPHandlerFunc) HTTPHandlerFunc {
+        return func(w http.ResponseWriter, r *http.Request) error {
             ctx := context.WithValue(r.Context(), dbContextKey, db)
-            next.ServeHTTP(w, r.WithContext(ctx))
-        })
+            return next(w, r.WithContext(ctx))
+        }
     }
 }
 
@@ -69,11 +69,11 @@ type JSONResponse struct {
 }
 
 // handleDatabaseRequest handles all database operations via JSON
-func handleDatabaseRequest(w http.ResponseWriter, r *http.Request) {
+func handleDatabaseRequest(w http.ResponseWriter, r *http.Request) error {
     var req JSONRequest
     if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
         sendError(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
-        return
+        return err
     }
 
     db := getDB(r)
@@ -105,15 +105,19 @@ func handleDatabaseRequest(w http.ResponseWriter, r *http.Request) {
     case "get_schema":
         handleGetSchema(w, req, db)
     default:
-        sendError(w, "Unknown action: "+req.Action, http.StatusBadRequest)
+        err := fmt.Errorf("unknown action: %s", req.Action)
+        sendError(w, err.Error(), http.StatusBadRequest)
+        return err
     }
+
+    return nil
 }
 
 // handleCreateTable handles table creation from JSON schema
-func handleCreateTable(w http.ResponseWriter, req JSONRequest, db *DB) {
+func handleCreateTable(w http.ResponseWriter, req JSONRequest, db *DB) error {
     if req.Table == "" {
         sendError(w, "Table name is required", http.StatusBadRequest)
-        return
+        return fmt.Errorf("table name is required")
     }
 
     var schema string
@@ -124,29 +128,30 @@ func handleCreateTable(w http.ResponseWriter, req JSONRequest, db *DB) {
         schema = inferSchemaFromData(req.Data)
     } else {
         sendError(w, "Schema or sample data is required", http.StatusBadRequest)
-        return
+        return fmt.Errorf("schema or sample data is required")
     }
 
     err := db.CreateTable(req.Table, schema)
     if err != nil {
         sendError(w, "Failed to create table: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to create table: %w", err)
     }
 
     sendSuccess(w, map[string]string{"message": "Table created successfully"})
+    return nil
 }
 
 // handleInsert handles record insertion
-func handleInsert(w http.ResponseWriter, req JSONRequest, db *DB) {
+func handleInsert(w http.ResponseWriter, req JSONRequest, db *DB) error {
     if req.Table == "" || req.Data == nil {
         sendError(w, "Table name and data are required", http.StatusBadRequest)
-        return
+        return fmt.Errorf("table name and data are required")
     }
 
     id, err := db.Insert(req.Table, req.Data)
     if err != nil {
         sendError(w, "Failed to insert record: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to insert record: %w", err)
     }
 
     response := JSONResponse{
@@ -155,19 +160,21 @@ func handleInsert(w http.ResponseWriter, req JSONRequest, db *DB) {
         Data:    map[string]interface{}{"inserted_id": id},
     }
     json.NewEncoder(w).Encode(response)
+
+    return nil
 }
 
 // handleJoin handles simple join queries using the Examples.md format
-func handleJoin(w http.ResponseWriter, req JSONRequest, db *DB) {
+func handleJoin(w http.ResponseWriter, req JSONRequest, db *DB) error {
     // Validate required fields
     if len(req.Tables) < 2 {
         sendError(w, "At least two tables are required for join", http.StatusBadRequest)
-        return
+        return fmt.Errorf("at least two tables are required for join")
     }
     
     if req.On == "" {
         sendError(w, "Join condition (on) is required", http.StatusBadRequest)
-        return
+        return fmt.Errorf("join condition (on) is required")
     }
 
     // Build the join query
@@ -181,7 +188,7 @@ func handleJoin(w http.ResponseWriter, req JSONRequest, db *DB) {
         joinType, err = parseJoinType(req.JoinType)
         if err != nil {
             sendError(w, "Invalid join type: "+req.JoinType, http.StatusBadRequest)
-            return
+            return fmt.Errorf("invalid join type: %w", err)
         }
     }
 
@@ -197,14 +204,14 @@ func handleJoin(w http.ResponseWriter, req JSONRequest, db *DB) {
     rows, err := db.SelectWithJoin(baseTable, req.Columns, joins, req.Where, req.WhereArgs...)
     if err != nil {
         sendError(w, "Failed to execute join query: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to execute join query: %w", err)
     }
     defer rows.Close()
 
     results, err := rowsToJSON(rows)
     if err != nil {
         sendError(w, "Failed to process results: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to process results: %w", err)
     }
 
     response := JSONResponse{
@@ -213,13 +220,15 @@ func handleJoin(w http.ResponseWriter, req JSONRequest, db *DB) {
         Count:   int64(len(results)),
     }
     json.NewEncoder(w).Encode(response)
+
+    return nil
 }
 
 // handleSelect handles record selection
-func handleSelect(w http.ResponseWriter, req JSONRequest, db *DB) {
+func handleSelect(w http.ResponseWriter, req JSONRequest, db *DB) error {
     if req.Table == "" {
         sendError(w, "Table name is required", http.StatusBadRequest)
-        return
+        return fmt.Errorf("table name is required")
     }
 
     // Build query
@@ -229,14 +238,14 @@ func handleSelect(w http.ResponseWriter, req JSONRequest, db *DB) {
     rows, err := db.Query(query, args...)
     if err != nil {
         sendError(w, "Failed to select records: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to select records: %w", err)
     }
     defer rows.Close()
 
     results, err := rowsToJSON(rows)
     if err != nil {
         sendError(w, "Failed to process results: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to process results: %w", err)
     }
 
     response := JSONResponse{
@@ -246,18 +255,19 @@ func handleSelect(w http.ResponseWriter, req JSONRequest, db *DB) {
         Query:   query, // Optional: for debugging
     }
     json.NewEncoder(w).Encode(response)
+    return nil
 }
 
 // handleSelectWithJoin handles SELECT queries with joins
-func handleSelectWithJoin(w http.ResponseWriter, req JSONRequest, db *DB) {
+func handleSelectWithJoin(w http.ResponseWriter, req JSONRequest, db *DB) error {
     if req.Table == "" {
         sendError(w, "Table name is required", http.StatusBadRequest)
-        return
+        return fmt.Errorf("table name is required")
     }
 
     if len(req.Joins) == 0 {
         sendError(w, "At least one join is required for select_join action", http.StatusBadRequest)
-        return
+        return fmt.Errorf("at least one join is required for select_join action")
     }
 
     // Convert JSON joins to internal Join struct
@@ -266,7 +276,7 @@ func handleSelectWithJoin(w http.ResponseWriter, req JSONRequest, db *DB) {
         joinType, err := parseJoinType(jsonJoin.Type)
         if err != nil {
             sendError(w, "Invalid join type: "+jsonJoin.Type, http.StatusBadRequest)
-            return
+            return fmt.Errorf("invalid join type: %w", err)
         }
 
         joins = append(joins, Join{
@@ -279,14 +289,14 @@ func handleSelectWithJoin(w http.ResponseWriter, req JSONRequest, db *DB) {
     rows, err := db.SelectWithJoin(req.Table, req.Columns, joins, req.Where, req.WhereArgs...)
     if err != nil {
         sendError(w, "Failed to execute join query: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to execute join query: %w", err)
     }
     defer rows.Close()
 
     results, err := rowsToJSON(rows)
     if err != nil {
         sendError(w, "Failed to process results: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to process results: %w", err)
     }
 
     response := JSONResponse{
@@ -295,18 +305,19 @@ func handleSelectWithJoin(w http.ResponseWriter, req JSONRequest, db *DB) {
         Count:   int64(len(results)),
     }
     json.NewEncoder(w).Encode(response)
+    return nil
 }
 
 // handleCountWithJoin handles COUNT queries with joins
-func handleCountWithJoin(w http.ResponseWriter, req JSONRequest, db *DB) {
+func handleCountWithJoin(w http.ResponseWriter, req JSONRequest, db *DB) error {
     if req.Table == "" {
         sendError(w, "Table name is required", http.StatusBadRequest)
-        return
+        return fmt.Errorf("table name is required")
     }
 
     if len(req.Joins) == 0 {
         sendError(w, "At least one join is required for count_join action", http.StatusBadRequest)
-        return
+        return fmt.Errorf("at least one join is required for count_join action")
     }
 
     // Convert JSON joins to internal Join struct
@@ -315,7 +326,7 @@ func handleCountWithJoin(w http.ResponseWriter, req JSONRequest, db *DB) {
         joinType, err := parseJoinType(jsonJoin.Type)
         if err != nil {
             sendError(w, "Invalid join type: "+jsonJoin.Type, http.StatusBadRequest)
-            return
+            return fmt.Errorf("invalid join type: %w", err)
         }
 
         joins = append(joins, Join{
@@ -328,7 +339,7 @@ func handleCountWithJoin(w http.ResponseWriter, req JSONRequest, db *DB) {
     count, err := db.CountWithJoin(req.Table, joins, req.Where, req.WhereArgs...)
     if err != nil {
         sendError(w, "Failed to execute count join query: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to execute count join query: %w", err)
     }
 
     response := JSONResponse{
@@ -337,13 +348,14 @@ func handleCountWithJoin(w http.ResponseWriter, req JSONRequest, db *DB) {
         Data:    map[string]interface{}{"count": count},
     }
     json.NewEncoder(w).Encode(response)
+    return nil
 }
 
 // handleQueryBuilder handles complex queries using QueryBuilder
-func handleQueryBuilder(w http.ResponseWriter, req JSONRequest, db *DB) {
+func handleQueryBuilder(w http.ResponseWriter, req JSONRequest, db *DB) error {
     if req.Table == "" {
         sendError(w, "Table name is required", http.StatusBadRequest)
-        return
+        return fmt.Errorf("table name is required")
     }
 
     // Build query using QueryBuilder
@@ -359,7 +371,7 @@ func handleQueryBuilder(w http.ResponseWriter, req JSONRequest, db *DB) {
         joinType, err := parseJoinType(jsonJoin.Type)
         if err != nil {
             sendError(w, "Invalid join type: "+jsonJoin.Type, http.StatusBadRequest)
-            return
+            return fmt.Errorf("invalid join type: %w", err)
         }
 
         qb.Join(joinType, jsonJoin.Table, jsonJoin.Condition)
@@ -397,14 +409,14 @@ func handleQueryBuilder(w http.ResponseWriter, req JSONRequest, db *DB) {
     rows, err := qb.Execute(db)
     if err != nil {
         sendError(w, "Failed to execute query: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to execute query: %w", err)
     }
     defer rows.Close()
 
     results, err := rowsToJSON(rows)
     if err != nil {
         sendError(w, "Failed to process results: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to process results: %w", err)
     }
 
     // Get the generated query for debugging
@@ -417,19 +429,21 @@ func handleQueryBuilder(w http.ResponseWriter, req JSONRequest, db *DB) {
         Query:   query, // Show generated query
     }
     json.NewEncoder(w).Encode(response)
+
+    return nil
 }
 
 // handleUpdate handles record updates
-func handleUpdate(w http.ResponseWriter, req JSONRequest, db *DB) {
+func handleUpdate(w http.ResponseWriter, req JSONRequest, db *DB) error {
     if req.Table == "" || req.Data == nil {
         sendError(w, "Table name and data are required", http.StatusBadRequest)
-        return
+        return fmt.Errorf("table name and data are required")
     }
 
     rowsAffected, err := db.Update(req.Table, req.Data, req.Where, req.WhereArgs...)
     if err != nil {
         sendError(w, "Failed to update records: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to update records: %w", err)
     }
 
     response := JSONResponse{
@@ -438,19 +452,20 @@ func handleUpdate(w http.ResponseWriter, req JSONRequest, db *DB) {
         Data:    map[string]interface{}{"rows_affected": rowsAffected},
     }
     json.NewEncoder(w).Encode(response)
+    return nil
 }
 
 // handleDelete handles record deletion
-func handleDelete(w http.ResponseWriter, req JSONRequest, db *DB) {
+func handleDelete(w http.ResponseWriter, req JSONRequest, db *DB) error {
     if req.Table == "" {
         sendError(w, "Table name is required", http.StatusBadRequest)
-        return
+        return fmt.Errorf("table name is required")
     }
 
     rowsAffected, err := db.Delete(req.Table, req.Where, req.WhereArgs...)
     if err != nil {
         sendError(w, "Failed to delete records: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to delete records: %w", err)
     }
 
     response := JSONResponse{
@@ -459,19 +474,20 @@ func handleDelete(w http.ResponseWriter, req JSONRequest, db *DB) {
         Data:    map[string]interface{}{"rows_affected": rowsAffected},
     }
     json.NewEncoder(w).Encode(response)
+    return nil
 }
 
 // handleCount handles record counting
-func handleCount(w http.ResponseWriter, req JSONRequest, db *DB) {
+func handleCount(w http.ResponseWriter, req JSONRequest, db *DB) error {
     if req.Table == "" {
         sendError(w, "Table name is required", http.StatusBadRequest)
-        return
+        return fmt.Errorf("table name is required")
     }
 
     count, err := db.Count(req.Table, req.Where, req.WhereArgs...)
     if err != nil {
         sendError(w, "Failed to count records: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to count records: %w", err)
     }
 
     response := JSONResponse{
@@ -480,96 +496,103 @@ func handleCount(w http.ResponseWriter, req JSONRequest, db *DB) {
         Data:    map[string]interface{}{"count": count},
     }
     json.NewEncoder(w).Encode(response)
+    return nil
 }
 
 // handleDropTable handles table deletion
-func handleDropTable(w http.ResponseWriter, req JSONRequest, db *DB) {
+func handleDropTable(w http.ResponseWriter, req JSONRequest, db *DB) error {
     if req.Table == "" {
         sendError(w, "Table name is required", http.StatusBadRequest)
-        return
+        return fmt.Errorf("table name is required")
     }
 
     err := db.DropTable(req.Table)
     if err != nil {
         sendError(w, "Failed to drop table: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to drop table: %w", err)
     }
 
     sendSuccess(w, map[string]string{"message": "Table dropped successfully"})
+    return nil
 }
 
 // handleTableExists checks if table exists
-func handleTableExists(w http.ResponseWriter, req JSONRequest, db *DB) {
+func handleTableExists(w http.ResponseWriter, req JSONRequest, db *DB) error {
     if req.Table == "" {
         sendError(w, "Table name is required", http.StatusBadRequest)
-        return
+        return fmt.Errorf("table name is required")
     }
 
     exists, err := db.TableExists(req.Table)
     if err != nil {
         sendError(w, "Failed to check table existence: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to check table existence: %w", err)
     }
 
     sendSuccess(w, map[string]interface{}{"exists": exists})
+    return nil
 }
 
 // handleGetSchema gets table schema
-func handleGetSchema(w http.ResponseWriter, req JSONRequest, db *DB) {
+func handleGetSchema(w http.ResponseWriter, req JSONRequest, db *DB) error {
     if req.Table == "" {
         sendError(w, "Table name is required", http.StatusBadRequest)
-        return
+        return fmt.Errorf("table name is required")
     }
 
     schema, err := db.GetTableSchema(req.Table)
     if err != nil {
         sendError(w, "Failed to get table schema: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to get table schema: %w", err)
     }
 
     sendSuccess(w, map[string]interface{}{"schema": schema})
+    return nil
 }
 
 // handleHealth returns server health status
-func handleHealth(w http.ResponseWriter, r *http.Request) {
+func handleHealth(w http.ResponseWriter, r *http.Request) error {
     w.Header().Set("Content-Type", "application/json")
 
     db := getDB(r)
     err := db.Ping()
     if err != nil {
         sendError(w, "Database connection failed: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("database connection failed: %w", err)
     }
 
     sendSuccess(w, map[string]string{"status": "healthy"})
+    return nil
 }
 
 // handleStats returns database statistics
-func handleStats(w http.ResponseWriter, r *http.Request) {
+func handleStats(w http.ResponseWriter, r *http.Request) error {
     w.Header().Set("Content-Type", "application/json")
 
     db := getDB(r)
     stats, err := db.GetStats()
     if err != nil {
         sendError(w, "Failed to get stats: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to get stats: %w", err)
     }
 
     sendSuccess(w, stats)
+    return nil
 }
 
 // handleTables returns list of tables
-func handleTables(w http.ResponseWriter, r *http.Request) {
+func handleTables(w http.ResponseWriter, r *http.Request) error {
     w.Header().Set("Content-Type", "application/json")
 
     db := getDB(r)
     tables, err := db.ListTables()
     if err != nil {
         sendError(w, "Failed to list tables: "+err.Error(), http.StatusInternalServerError)
-        return
+        return fmt.Errorf("failed to list tables: %w", err)
     }
 
     sendSuccess(w, map[string]interface{}{"tables": tables})
+    return nil
 }
 
 // Helper functions
