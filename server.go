@@ -1,7 +1,7 @@
 package main
 
 import (
-	"fmt"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -147,7 +147,7 @@ func (s *Server) Start(port string) error {
 		s.mux.HandleFunc(pattern, finalHandler)
 	}
 
-	fmt.Printf("Server starting on port %s\n", port)
+	log.Printf("Server starting on port %s\n", port)
 	return http.ListenAndServe(port, s.mux)
 }
 
@@ -230,7 +230,7 @@ func (rg *RouteGroup) buildFullPattern(pattern string) string {
 // Example middleware functions updated for new signature
 func LoggingMiddleware(next HTTPHandlerFunc) HTTPHandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) error {
-		fmt.Printf("[%s] %s %s\n", r.Method, r.URL.Path, r.RemoteAddr)
+		log.Printf("[%s] %s %s\n", r.Method, r.URL.Path, r.RemoteAddr)
 		return next(w, r)
 	}
 }
