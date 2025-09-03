@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 )
+
+const workingDirectoryContextKey contextKey = "working_directory"
 
 func main() {
 	// Create server instance
@@ -14,7 +17,8 @@ func main() {
 	server.Use(authMiddleware)
 	server.Use(LoggingMiddleware)
 	server.Use(CORSMiddleware)
-	server.Use(dbMiddleware("pdb_data"))
+	server.Use(WorkingDirectoryMiddleware("pdb_data"))
+	server.Use(dbMiddleware)
 
 	// Add root routes
 	server.GET("/", homeHandler)
@@ -34,4 +38,13 @@ func main() {
 func homeHandler(w http.ResponseWriter, r *http.Request) error {
 	fmt.Fprintf(w, "Welcome to PebbleDB Server!")
 	return nil
+}
+
+func WorkingDirectoryMiddleware(basePath string) func(HTTPHandlerFunc) HTTPHandlerFunc {
+	return func(next HTTPHandlerFunc) HTTPHandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) error {
+			ctx := context.WithValue(r.Context(), workingDirectoryContextKey, basePath)
+			return next(w, r.WithContext(ctx))
+		}
+	}
 }

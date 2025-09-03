@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 
-	// "regexp"
 	"strconv"
 	"strings"
 
@@ -19,27 +21,70 @@ type contextKey string
 
 const dbContextKey contextKey = "database"
 
+// Project represents a database project
+type Project struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	CreatedAt   string `json:"created_at"`
+	Path        string `json:"path,omitempty"`
+}
+
+// Actions that don't require database middleware
+var skipDBActions = map[string]bool{
+	"create_project": true,
+	"list_projects":  true,
+	"delete_project": true,
+	"get_project":    true,
+}
+
 // Middleware to inject database into context
-func dbMiddleware(basePath string) func(HTTPHandlerFunc) HTTPHandlerFunc {
-	return func(next HTTPHandlerFunc) HTTPHandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) error {
-			userID := r.Context().Value(userContextKey).(string)
-			projectID := r.URL.Query().Get("project")
-
-			if userID == "" || projectID == "" {
-				return BadRequest("Missing user/project")
-			}
-
-			key := fmt.Sprintf("%s_%s", userID, projectID)
-			log.Println("Database connection established")
-			db, err := getProjectDB(basePath, key)
+func dbMiddleware(next HTTPHandlerFunc) HTTPHandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) error {
+		// Parse JSON to check if we should skip DB middleware
+		var req JSONRequest
+		if r.Method == "POST" && r.Body != nil && r.ContentLength > 0 {
+			// Read the body
+			bodyBytes, err := io.ReadAll(r.Body)
 			if err != nil {
-				return InternalServerError("Failed to load DB: " + err.Error())
+				return BadRequest("Failed to read request body")
 			}
 
-			ctx := context.WithValue(r.Context(), dbContextKey, db)
-			return next(w, r.WithContext(ctx))
+			// Try to parse JSON, but don't fail if it's invalid
+			json.Unmarshal(bodyBytes, &req)
+
+			// Reset body for downstream handlers
+			r.Body = io.NopCloser(strings.NewReader(string(bodyBytes)))
 		}
+
+		// Skip database middleware for certain actions
+		if skipDBActions[req.Action] {
+			return next(w, r)
+		}
+
+		userID := r.Context().Value(userContextKey).(string)
+		projectID := req.ProjectID
+		if projectID == "" {
+			projectID = r.URL.Query().Get("project")
+		}
+
+		if userID == "" || projectID == "" {
+			return BadRequest("Missing user/project")
+		}
+
+		// Keep user/project format as requested
+		basePath := r.Context().Value(workingDirectoryContextKey).(string)
+		dbKey := fmt.Sprintf("%s/%s", userID, projectID)
+		projectsBasePath := filepath.Join(basePath, "projects")
+
+		log.Println("Database connection established for project:", projectID)
+		db, err := getProjectDB(projectsBasePath, dbKey)
+		if err != nil {
+			return InternalServerError("Failed to load DB: " + err.Error())
+		}
+
+		ctx := context.WithValue(r.Context(), dbContextKey, db)
+		return next(w, r.WithContext(ctx))
 	}
 }
 
@@ -58,6 +103,7 @@ type JSONJoin struct {
 // JSONRequest represents a generic JSON request
 type JSONRequest struct {
 	Action    string                 `json:"action"`
+	ProjectID string                 `json:"project_id,omitempty"` // Project identifier
 	Table     string                 `json:"table"`
 	Tables    []string               `json:"tables,omitempty"`    // For join action
 	On        string                 `json:"on,omitempty"`        // For join condition
@@ -73,6 +119,9 @@ type JSONRequest struct {
 	Having    string                 `json:"having,omitempty"`
 	Schema    map[string]interface{} `json:"schema,omitempty"`
 	Joins     []JSONJoin             `json:"joins,omitempty"`
+	// Project-specific fields
+	ProjectName        string `json:"project_name,omitempty"`
+	ProjectDescription string `json:"project_description,omitempty"`
 }
 
 // JSONResponse represents a generic JSON response
@@ -93,6 +142,21 @@ func handleDatabaseRequest(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
+	// Handle project management actions first
+	switch req.Action {
+	case "create_project":
+		return handleCreateProject(w, req, r)
+	case "list_projects":
+		return handleListProjects(w, req, r)
+	case "delete_project":
+		return handleDeleteProject(w, req, r)
+	case "get_project":
+		return handleGetProject(w, req, r)
+	case "get_tables":
+		return handleGetTables(w, req, r)
+	}
+
+	// For database operations, get the database connection
 	db := getDB(r)
 	switch req.Action {
 	case "create_table":
@@ -785,4 +849,215 @@ func sendError(w http.ResponseWriter, message string, statusCode int) {
 		Error:   message,
 	}
 	json.NewEncoder(w).Encode(response)
+}
+
+// Project Management Handlers
+
+// handleCreateProject creates a new project
+func handleCreateProject(w http.ResponseWriter, req JSONRequest, r *http.Request) error {
+	if req.ProjectID == "" || req.ProjectName == "" {
+		sendError(w, "Project ID and name are required", http.StatusBadRequest)
+		return fmt.Errorf("project ID and name are required")
+	}
+
+	userID := r.Context().Value(userContextKey).(string)
+	if userID == "" {
+		sendError(w, "User ID is required", http.StatusBadRequest)
+		return fmt.Errorf("user ID is required")
+	}
+
+	// Create project directory
+	basePath := r.Context().Value(workingDirectoryContextKey).(string)
+	projectsDir := filepath.Join(basePath, "projects", userID)
+	if err := os.MkdirAll(projectsDir, 0755); err != nil {
+		sendError(w, "Failed to create project directory: "+err.Error(), http.StatusInternalServerError)
+		return fmt.Errorf("failed to create project directory: %w", err)
+	}
+
+	// Create project database - keep user/project format as requested
+	dbKey := fmt.Sprintf("%s/%s", userID, req.ProjectID)
+	projectPath := filepath.Join(projectsDir, req.ProjectID+".db")
+
+	// Check if project already exists
+	if _, err := os.Stat(projectPath); err == nil {
+		sendError(w, "Project already exists", http.StatusConflict)
+		return fmt.Errorf("project already exists")
+	}
+
+	// Initialize the database - ensure projects directory exists
+	projectsBasePath := filepath.Join(basePath, "projects")
+	if err := os.MkdirAll(projectsBasePath, 0755); err != nil {
+		sendError(w, "Failed to create projects base directory: "+err.Error(), http.StatusInternalServerError)
+		return fmt.Errorf("failed to create projects base directory: %w", err)
+	}
+
+	_, err := getProjectDB(projectsBasePath, dbKey)
+	if err != nil {
+		sendError(w, "Failed to create project database: "+err.Error(), http.StatusInternalServerError)
+		return fmt.Errorf("failed to create project database: %w", err)
+	}
+
+	// Create project metadata
+	project := Project{
+		ID:          req.ProjectID,
+		Name:        req.ProjectName,
+		Description: req.ProjectDescription,
+		CreatedAt:   fmt.Sprintf("%d", os.Getpid()), // Simplified timestamp
+		Path:        projectPath,
+	}
+
+	// Save project metadata (you might want to store this in a separate metadata DB)
+	metadataPath := filepath.Join(projectsDir, req.ProjectID+".json")
+	metadataFile, err := os.Create(metadataPath)
+	if err != nil {
+		sendError(w, "Failed to create project metadata: "+err.Error(), http.StatusInternalServerError)
+		return fmt.Errorf("failed to create project metadata: %w", err)
+	}
+	defer metadataFile.Close()
+
+	if err := json.NewEncoder(metadataFile).Encode(project); err != nil {
+		sendError(w, "Failed to save project metadata: "+err.Error(), http.StatusInternalServerError)
+		return fmt.Errorf("failed to save project metadata: %w", err)
+	}
+
+	sendSuccess(w, map[string]interface{}{
+		"message": "Project created successfully",
+		"project": project,
+	})
+	return nil
+}
+
+// handleListProjects lists all projects for a user
+func handleListProjects(w http.ResponseWriter, req JSONRequest, r *http.Request) error {
+	userID := r.Context().Value(userContextKey).(string)
+	if userID == "" {
+		sendError(w, "User ID is required", http.StatusBadRequest)
+		return fmt.Errorf("user ID is required")
+	}
+
+	basePath := r.Context().Value(workingDirectoryContextKey).(string)
+	projectsDir := filepath.Join(basePath, "projects", userID)
+	if _, err := os.Stat(projectsDir); os.IsNotExist(err) {
+		sendSuccess(w, map[string]interface{}{"projects": []Project{}})
+		return nil
+	}
+
+	files, err := os.ReadDir(projectsDir)
+	if err != nil {
+		sendError(w, "Failed to read projects directory: "+err.Error(), http.StatusInternalServerError)
+		return fmt.Errorf("failed to read projects directory: %w", err)
+	}
+
+	var projects []Project
+	for _, file := range files {
+		if !file.IsDir() && strings.HasSuffix(file.Name(), ".json") {
+			metadataPath := filepath.Join(projectsDir, file.Name())
+			metadataFile, err := os.Open(metadataPath)
+			if err != nil {
+				continue
+			}
+
+			var project Project
+			if err := json.NewDecoder(metadataFile).Decode(&project); err != nil {
+				metadataFile.Close()
+				continue
+			}
+			metadataFile.Close()
+
+			projects = append(projects, project)
+		}
+	}
+
+	sendSuccess(w, map[string]interface{}{"projects": projects})
+	return nil
+}
+
+// handleDeleteProject deletes a project
+func handleDeleteProject(w http.ResponseWriter, req JSONRequest, r *http.Request) error {
+	if req.ProjectID == "" {
+		sendError(w, "Project ID is required", http.StatusBadRequest)
+		return fmt.Errorf("project ID is required")
+	}
+
+	userID := r.Context().Value(userContextKey).(string)
+	if userID == "" {
+		sendError(w, "User ID is required", http.StatusBadRequest)
+		return fmt.Errorf("user ID is required")
+	}
+
+	basePath := r.Context().Value(workingDirectoryContextKey).(string)
+	projectsDir := filepath.Join(basePath, "projects", userID)
+	dbPath := filepath.Join(projectsDir, req.ProjectID+".db")
+	metadataPath := filepath.Join(projectsDir, req.ProjectID+".json")
+
+	// Remove database file
+	if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
+		sendError(w, "Failed to delete project database: "+err.Error(), http.StatusInternalServerError)
+		return fmt.Errorf("failed to delete project database: %w", err)
+	}
+
+	// Remove metadata file
+	if err := os.Remove(metadataPath); err != nil && !os.IsNotExist(err) {
+		sendError(w, "Failed to delete project metadata: "+err.Error(), http.StatusInternalServerError)
+		return fmt.Errorf("failed to delete project metadata: %w", err)
+	}
+
+	sendSuccess(w, map[string]interface{}{"message": "Project deleted successfully"})
+	return nil
+}
+
+// handleGetProject gets project information
+func handleGetProject(w http.ResponseWriter, req JSONRequest, r *http.Request) error {
+	if req.ProjectID == "" {
+		sendError(w, "Project ID is required", http.StatusBadRequest)
+		return fmt.Errorf("project ID is required")
+	}
+
+	userID := r.Context().Value(userContextKey).(string)
+	if userID == "" {
+		sendError(w, "User ID is required", http.StatusBadRequest)
+		return fmt.Errorf("user ID is required")
+	}
+
+	basePath := r.Context().Value(workingDirectoryContextKey).(string)
+	projectsDir := filepath.Join(basePath, "projects", userID)
+	metadataPath := filepath.Join(projectsDir, req.ProjectID+".json")
+
+	metadataFile, err := os.Open(metadataPath)
+	if err != nil {
+		sendError(w, "Project not found", http.StatusNotFound)
+		return fmt.Errorf("project not found")
+	}
+	defer metadataFile.Close()
+
+	var project Project
+	if err := json.NewDecoder(metadataFile).Decode(&project); err != nil {
+		sendError(w, "Failed to read project metadata: "+err.Error(), http.StatusInternalServerError)
+		return fmt.Errorf("failed to read project metadata: %w", err)
+	}
+
+	sendSuccess(w, map[string]interface{}{"project": project})
+	return nil
+}
+
+// handleGetTables gets all tables for a project (requires DB connection)
+func handleGetTables(w http.ResponseWriter, req JSONRequest, r *http.Request) error {
+	if req.ProjectID == "" {
+		sendError(w, "Project ID is required", http.StatusBadRequest)
+		return fmt.Errorf("project ID is required")
+	}
+
+	// This requires database connection, so get it from context
+	db := getDB(r)
+	tables, err := db.ListTables()
+	if err != nil {
+		sendError(w, "Failed to list tables: "+err.Error(), http.StatusInternalServerError)
+		return fmt.Errorf("failed to list tables: %w", err)
+	}
+
+	sendSuccess(w, map[string]interface{}{
+		"project_id": req.ProjectID,
+		"tables":     tables,
+	})
+	return nil
 }
