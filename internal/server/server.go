@@ -1,47 +1,10 @@
-package main
+package server
 
 import (
 	"log"
 	"net/http"
 	"strings"
 )
-
-// HTTPError represents an HTTP error with status code and message
-type HTTPError struct {
-	Code    int
-	Message string
-}
-
-// Error implements the error interface
-func (e HTTPError) Error() string {
-	return e.Message
-}
-
-// NewHTTPError creates a new HTTP error
-func NewHTTPError(code int, message string) HTTPError {
-	return HTTPError{Code: code, Message: message}
-}
-
-// Common HTTP error constructors
-func BadRequest(message string) HTTPError {
-	return NewHTTPError(http.StatusBadRequest, message)
-}
-
-func NotFound(message string) HTTPError {
-	return NewHTTPError(http.StatusNotFound, message)
-}
-
-func InternalServerError(message string) HTTPError {
-	return NewHTTPError(http.StatusInternalServerError, message)
-}
-
-func Unauthorized(message string) HTTPError {
-	return NewHTTPError(http.StatusUnauthorized, message)
-}
-
-func Forbidden(message string) HTTPError {
-	return NewHTTPError(http.StatusForbidden, message)
-}
 
 // HTTPHandlerFunc is a handler function that can return an error
 type HTTPHandlerFunc func(http.ResponseWriter, *http.Request) error
@@ -157,7 +120,6 @@ func (s *Server) createMethodDispatcher(routes []Route) http.HandlerFunc {
 		// Find matching route for the HTTP method
 		for _, route := range routes {
 			if route.Method == "" || route.Method == r.Method {
-				// Call the handler and handle any returned error
 				if err := route.Handler(w, r); err != nil {
 					s.handleError(w, err)
 				}
@@ -176,7 +138,8 @@ func (s *Server) handleError(w http.ResponseWriter, err error) {
 		http.Error(w, httpErr.Message, httpErr.Code)
 	} else {
 		// Handle regular errors as internal server errors
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		log.Printf("Internal server error: %v", err)
 	}
 }
 
@@ -225,27 +188,4 @@ func (rg *RouteGroup) buildFullPattern(pattern string) string {
 		return prefix + "/"
 	}
 	return prefix + "/" + pattern
-}
-
-// Example middleware functions updated for new signature
-func LoggingMiddleware(next HTTPHandlerFunc) HTTPHandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) error {
-		log.Printf("[%s] %s %s\n", r.Method, r.URL.Path, r.RemoteAddr)
-		return next(w, r)
-	}
-}
-
-func CORSMiddleware(next HTTPHandlerFunc) HTTPHandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) error {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return nil
-		}
-
-		return next(w, r)
-	}
 }

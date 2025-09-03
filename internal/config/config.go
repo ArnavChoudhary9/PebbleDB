@@ -1,15 +1,15 @@
-package main
+package config
 
 import (
-	"fmt" // Add this import
+	"fmt"
 	"log"
 	"os"
 
 	"github.com/joho/godotenv"
 )
 
-// EnvConfig holds all environment variables
-type EnvConfig struct {
+// Config holds all environment variables
+type Config struct {
 	JWKSUrl         string
 	AuthTokenName   string
 	TokenRefreshUrl string
@@ -18,13 +18,13 @@ type EnvConfig struct {
 }
 
 // LoadConfig loads environment variables and returns a Config struct
-func LoadConfig() *EnvConfig {
+func LoadConfig() *Config {
 	err := godotenv.Load()
 	if err != nil {
 		log.Println("Warning: .env file not found or could not be loaded")
 	}
 
-	return &EnvConfig{
+	return &Config{
 		JWKSUrl:         os.Getenv("JWKS_URL"),
 		AuthTokenName:   os.Getenv("AUTH_TOKEN_NAME"),
 		TokenRefreshUrl: os.Getenv("TOKEN_REFRESH_URL"),
@@ -34,7 +34,7 @@ func LoadConfig() *EnvConfig {
 }
 
 // Validate checks if all required environment variables are set
-func (c *EnvConfig) Validate() error {
+func (c *Config) Validate() error {
 	if c.JWKSUrl == "" {
 		return fmt.Errorf("JWKS_URL environment variable is required")
 	}
