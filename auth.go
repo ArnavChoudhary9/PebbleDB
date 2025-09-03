@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"log"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+const userContextKey contextKey = "user"
 
 func authMiddleware(next HTTPHandlerFunc) HTTPHandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) error {
@@ -21,8 +24,7 @@ func authMiddleware(next HTTPHandlerFunc) HTTPHandlerFunc {
 
 		// Define excluded path patterns that should bypass authentication
 		excludedPatterns := []string{
-			`^/api/health$`,   // Health check endpoint
-			`^/api/stats$`,    // Stats endpoint
+			// `^/api/health$`,   // Health check endpoint
 			`^/favicon\.ico$`, // Favicon
 			`^/robots\.txt$`,  // Robots.txt (optional)
 		}
@@ -127,6 +129,8 @@ func authMiddleware(next HTTPHandlerFunc) HTTPHandlerFunc {
 
 		log.Printf("Authenticated request to %s with user ID: %v", p, claims["sub"])
 
-		return next(w, r)
+		// Inject User id into request context
+		ctx := context.WithValue(r.Context(), userContextKey, claims["sub"])
+		return next(w, r.WithContext(ctx))
 	}
 }
